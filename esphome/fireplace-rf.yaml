@@ -38,10 +38,11 @@ esphome:
   friendly_name: Fireplace
   project:
     name: brodiedes.fireplace-remote
-    version: "2.1.0"
+    version: "2.2.0"
   includes:
     - fireplace_codes.h
     - wifi_fallback.h
+    - remote_rx.h
   on_boot:
     - priority: -100
       then:
@@ -158,6 +159,23 @@ globals:
   - id: learn_unknown       # ID of a remote heard while learning with unknown codes
     type: uint32_t
     initial_value: "0"
+  # Remote resends. The remote repeats its own state every ~10 min without a press. If
+  # HA changed the fire since, that repeat undoes it: puts the fire out, or lights it.
+  - id: remote_last         # state_key of the last state heard from the remote; unknown after boot
+    type: int
+    initial_value: "-100"
+  - id: burst_start         # millis() of the first capture of the current transmission
+    type: uint32_t
+    initial_value: "0"
+  - id: restore_pending     # a resend changed the fire; put it back unless the remote is used
+    type: bool
+    initial_value: "false"
+  - id: relights            # relights in the current hour, and when that hour started
+    type: int
+    initial_value: "0"
+  - id: relight_hour
+    type: uint32_t
+    initial_value: "0"
 
 script:
   # The one place state changes. tx=false when the change came from the original
@@ -239,6 +257,23 @@ script:
           format: "Max runtime reached: sending OFF"
       - lambda: "id(update_fire).execute(false, id(flame_lvl), id(fan_lvl), true, std::string(\"Max runtime\"));"
 
+  # A remote resend changed the fire. If the remote stays quiet for 5 s, nobody is pressing
+  # buttons, so send the board's state again. The board's state never changed, so the max
+  # runtime keeps counting from the original turn-on. HA or max runtime turning the fire
+  # off meanwhile changes that state, so this then sends OFF.
+  - id: restore_state
+    mode: restart
+    then:
+      - delay: 5s
+      - lambda: |-
+          if (!id(restore_pending))
+            return;
+          id(restore_pending) = false;
+          if (id(fire_on))
+            id(relights)++;
+          ESP_LOGI("remote", "Remote resend not followed: sending the fire's state again");
+          id(update_fire).execute(id(fire_on), id(flame_lvl), id(fan_lvl), true, std::string("Restored after remote resend"));
+
   # "Learn Remote": for 60 s, the next clean capture from any remote becomes the remote
   # the board copies. on_raw does the learning; this only opens and closes the window.
   - id: learn_remote
@@ -316,11 +351,48 @@ remote_receiver:
             id(remote_id).update();
           }
           // Only the remote the board copies; neighbours' remotes are ignored.
+          auto states = fireplace::capture_states(x, id(remote_code));
+          if (states.empty())
+            return;
+          ESP_LOGI("rx", "Heard %u symbols: %s", (unsigned) x.size(), fireplace::frame_summary(states).c_str());
           if (!fireplace::decode_frames(x, id(remote_code), off, flame, fan))
             return;
           // Flame 0 is the burner off with the pilot lit (AUTO sends it when satisfied).
           bool on = !off && flame > 0;
-          if (on == id(fire_on) && (flame == 0 || flame == id(flame_lvl)) && fan == id(fan_lvl))
+          bool same_as_fire = on == id(fire_on) && (flame == 0 || flame == id(flame_lvl)) && fan == id(fan_lvl);
+
+          // Resends. A press always changes what the remote shows (there is no OFF button:
+          // OFF is reached through the mode cycle), so one burst of a single state equal to
+          // the remote's last one is the remote repeating itself. If that undoes a change
+          // made from HA, put it back after 5 s, unless the remote is used again first.
+          int key = fireplace::state_key(off, flame, fan);
+          bool repeat = key == id(remote_last);
+          id(remote_last) = key;
+          uint32_t now = millis();
+          bool same_burst = now - id(burst_start) < 1500;  // one ~1 s transmission, several captures
+          if (!same_burst)
+            id(burst_start) = now;
+          if (id(restore_pending)) {
+            if (same_burst && repeat)
+              return;  // the rest of the resend
+            id(restore_pending) = false;
+            id(restore_state).stop();
+            ESP_LOGI("remote", "Remote used again: following it");
+          } else if (repeat && !same_burst && states.size() == 1 && !same_as_fire) {
+            if (now - id(relight_hour) > 3600000) {
+              id(relight_hour) = now;
+              id(relights) = 0;
+            }
+            if (!id(fire_on) || id(relights) < 8) {
+              ESP_LOGI("remote", "Remote resent off=%d flame=%d fan=%d: restoring in 5 s unless it is used", off, flame, fan);
+              id(restore_pending) = true;
+              id(restore_state).execute();
+              return;
+            }
+            ESP_LOGW("remote", "Already relit 8 times this hour: following the remote");
+          }
+
+          if (same_as_fire)
             return;  // a repeat of the same press
           ESP_LOGI("remote", "Remote: off=%d flame=%d fan=%d", off, flame, fan);
           id(update_fire).execute(on, flame, fan, false, std::string("Remote"));
