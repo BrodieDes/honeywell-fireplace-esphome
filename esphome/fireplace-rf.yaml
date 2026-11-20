@@ -23,6 +23,10 @@
 #     captive portal for entering new Wi-Fi details.
 #   - Factory reset: power-cycle it 5 times, each within 10 s of the last.
 #
+# Knob wall remote (2.3.0): a battery Waveshare knob talks to this board over ESP-NOW
+# (see fireplace_link.h). It asks for the state on every wake and can send changes,
+# which go through update_fire like HA's, so every safety rule above still applies.
+#
 # Wiring (CC1101 -> ESP32-S3):
 #   VCC  -> 3V3 (never 5V)
 #   GND  -> GND
@@ -38,11 +42,13 @@ esphome:
   friendly_name: Fireplace
   project:
     name: brodiedes.fireplace-remote
-    version: "2.2.0"
+    version: "2.4.0"
   includes:
     - fireplace_codes.h
     - wifi_fallback.h
     - remote_rx.h
+    - fireplace_link_key.h   # make it with tools/make_link_key.py; never commit it
+    - fireplace_link.h
   on_boot:
     - priority: -100
       then:
@@ -170,6 +176,23 @@ globals:
   - id: restore_pending     # a resend changed the fire; put it back unless the remote is used
     type: bool
     initial_value: "false"
+  # Knob link (fireplace_link.h): when the fire last went on, for the time left before
+  # max runtime, and who made the last change.
+  - id: on_since
+    type: uint32_t
+    initial_value: "0"
+  - id: last_source
+    type: uint8_t
+    initial_value: "0"
+  # The one-use token a knob SET must carry, from the last STATE sent.
+  - id: hub_nonce
+    type: std::array<uint8_t, 8>
+  - id: nonce_ms
+    type: uint32_t
+    initial_value: "0"
+  - id: nonce_valid
+    type: bool
+    initial_value: "false"
   - id: relights            # relights in the current hour, and when that hour started
     type: int
     initial_value: "0"
@@ -197,8 +220,14 @@ script:
           id(fan_lvl) = fan < 0 ? 0 : fan > 6 ? 6 : fan;
           if (tx)
             id(send_twice).execute(!want_on, id(flame_lvl), id(fan_lvl));
-          if (want_on && !was_on)
+          if (want_on && !was_on) {
             id(runtime_guard).execute();
+            id(on_since) = millis();
+          }
+          using namespace fireplace_link;
+          id(last_source) = source == "HA" ? SRC_HA : source == "Remote" ? SRC_REMOTE
+              : source == "Max runtime" ? SRC_MAX_RUNTIME : source == "Boot" ? SRC_BOOT
+              : source == "Knob" ? SRC_KNOB : source.rfind("Res", 0) == 0 ? SRC_RESEND : SRC_UNKNOWN;
           if (!want_on)
             id(runtime_guard).stop();
           char buf[64];
@@ -397,6 +426,82 @@ remote_receiver:
           ESP_LOGI("remote", "Remote: off=%d flame=%d fan=%d", off, flame, fan);
           id(update_fire).execute(on, flame, fan, false, std::string("Remote"));
 
+# Knob wall remote. Only the knob's MAC is a peer; packets from anyone else go to
+# on_unknown_peer and are dropped. Every message is HMAC-signed (fireplace_link.h).
+espnow:
+  id: espnow_link
+  peers:
+    - 00:00:00:00:00:00   # your knob's Wi-Fi MAC (printed by the knob on USB serial; see README)
+  on_receive:
+    - lambda: |-
+        using namespace fireplace_link;
+        uint8_t type = msg_type(data, size);
+        uint8_t echo[8];
+        if (type == MSG_GET) {
+          Get g;
+          if (!open(data, size, MSG_GET, g)) {
+            ESP_LOGW("knob", "Bad GET (wrong key or corrupt): ignored");
+            return;
+          }
+          memcpy(echo, g.knob_nonce, 8);
+          if (g.battery_mv) {
+            id(knob_battery).publish_state(g.battery_mv / 1000.0f);
+            bool usb = g.battery_mv > USB_MV;
+            id(knob_charging).publish_state(usb);
+            if (!usb)  // on USB the reading is the supply, not the battery
+              id(knob_battery_level).publish_state(battery_pct(g.battery_mv));
+          }
+          if (info.rx_ctrl)
+            id(knob_signal).publish_state(info.rx_ctrl->rssi);
+          ESP_LOGI("knob", "GET: battery %u mV, wake %u, awake %u s, fw %04X",
+                   g.battery_mv, (unsigned) g.wakes, (unsigned) g.awake_s, g.fw);
+        } else if (type == MSG_SET) {
+          Set m;
+          if (!open(data, size, MSG_SET, m)) {
+            ESP_LOGW("knob", "Bad SET (wrong key or corrupt): ignored");
+            return;
+          }
+          memcpy(echo, m.hub_nonce, 8);
+          bool fresh = id(nonce_valid) && memcmp(m.hub_nonce, id(hub_nonce).data(), 8) == 0 &&
+                       millis() - id(nonce_ms) < NONCE_TTL_MS;
+          if (!fresh) {
+            // Old or reused token: don't act, but reply so the knob can retry with a new one.
+            ESP_LOGW("knob", "SET with a stale token: not applied");
+          } else {
+            id(nonce_valid) = false;
+            if (m.max_runtime_hh >= 2 && m.max_runtime_hh <= 16) {
+              auto call = id(max_runtime).make_call();
+              call.set_value(m.max_runtime_hh / 2.0f);
+              call.perform();
+            }
+            int flame = m.flame < 1 ? 1 : m.flame > 6 ? 6 : m.flame;
+            int fan = m.fan > 6 ? 6 : m.fan;
+            bool on = m.on != 0;
+            // Like HA: level changes while off only set the next turn-on's levels.
+            id(update_fire).execute(on, flame, fan, on || id(fire_on), std::string("Knob"));
+          }
+        } else {
+          return;
+        }
+        State st{};
+        memcpy(st.echo, echo, 8);
+        esp_fill_random(id(hub_nonce).data(), 8);
+        id(nonce_ms) = millis();
+        id(nonce_valid) = true;
+        memcpy(st.hub_nonce, id(hub_nonce).data(), 8);
+        st.on = id(fire_on);
+        st.flame = id(flame_lvl);
+        st.fan = id(fan_lvl);
+        st.max_runtime_hh = (uint8_t) lroundf(id(max_runtime).state * 2.0f);
+        if (id(fire_on)) {
+          float total = id(max_runtime).state * 3600.0f;
+          float elapsed = (millis() - id(on_since)) / 1000.0f;
+          st.seconds_left = elapsed < total ? (uint32_t) (total - elapsed) : 0;
+        }
+        st.last_source = id(last_source);
+        seal(st, MSG_STATE);
+        id(espnow_link).send(info.src_addr, (const uint8_t *) &st, sizeof(st));
+
 switch:
   - platform: template
     name: None           # main entity: takes the device name, "Fireplace"
@@ -472,12 +577,42 @@ text_sensor:
     update_interval: 60s
     lambda: "return {ESPHOME_PROJECT_VERSION};"
 
+binary_sensor:
+  # On when the knob last reported from USB power (reading above 4.3 V).
+  - platform: template
+    id: knob_charging
+    name: "Knob On USB"
+    device_class: plug
+    icon: mdi:usb
+
 sensor:
   - platform: wifi_signal
     name: "WiFi Signal"
     update_interval: 60s
   - platform: uptime
     name: "Uptime"
+  # Reported by the knob wall remote each time it wakes.
+  - platform: template
+    id: knob_battery
+    name: "Knob Battery"
+    device_class: voltage
+    unit_of_measurement: V
+    accuracy_decimals: 2
+    update_interval: never
+  - platform: template
+    id: knob_battery_level
+    name: "Knob Battery Level"
+    device_class: battery
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: never
+  - platform: template
+    id: knob_signal
+    name: "Knob Signal"
+    device_class: signal_strength
+    unit_of_measurement: dBm
+    entity_category: diagnostic
+    update_interval: never
 
 button:
   # Sends the current state again, for when the fireplace and HA disagree.
