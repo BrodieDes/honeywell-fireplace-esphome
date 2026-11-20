@@ -116,6 +116,7 @@ A [Waveshare ESP32-S3-Knob-Touch-LCD-1.8](https://www.waveshare.com/esp32-s3-kno
 - **Sending:** a change is sent 1 second after the knob stops turning. It goes through the same code as HA, so Max Runtime and every other safety rule still apply.
 - **Sleep:** it sleeps 10 seconds after the last touch or turn, and wakes on a tap or a knob click. On every wake it asks the board for the current state, so changes made in HA or with the original remote show up.
 - **Check-in:** every 6 hours it wakes briefly with the screen off and reports its battery to HA.
+- **Thermostat:** the thermostat's target temperature shows to the left of the fireplace and the room temperature to the right. The board reads both from HA: set your climate entity in the `thermostat` substitution at the top of `esphome/fireplace-rf.yaml`. With no such entity the knob shows "--".
 
 It talks to the board over **ESP-NOW**, not Wi-Fi, so it doesn't have to join your network on every wake. ESPHome's ESP-NOW has no encryption, so every message is signed with HMAC-SHA256 using the key from `tools/make_link_key.py`. A command is only accepted with a one-time token from the board that's less than 60 seconds old, so recorded messages can't be replayed. The full protocol is in `esphome/fireplace_link.h`.
 
@@ -124,6 +125,7 @@ It talks to the board over **ESP-NOW**, not Wi-Fi, so it doesn't have to join yo
 1. **Board side:** put the knob's Wi-Fi MAC in `esphome/fireplace-rf.yaml` under `espnow: peers:`. The knob prints it on USB serial at 115200 baud ("knob MAC ..."), so flash the knob once first to read it.
 2. **Knob side:** put the board's Wi-Fi MAC in `HUB_MAC` at the top of `knob/fireplace_knob/fireplace_knob.ino`. HA shows it on the ESPHome device page, and it's in the board's log at start-up.
 3. **Key:** check that `knob/fireplace_knob/fireplace_link_key.h` is the same file as `esphome/fireplace_link_key.h`. `make_link_key.py` writes both.
+   The board and the knob must run matching versions of `fireplace_link.h` (its `VERSION`). After updating one, update the other, or the knob shows "Can't reach fireplace".
 4. **Build and flash** with Arduino-ESP32 3.3 or newer:
    1. Install LVGL **8.4** and copy `knob/lv_conf.h` next to the `lvgl` library folder.
    2. Build and flash with arduino-cli:

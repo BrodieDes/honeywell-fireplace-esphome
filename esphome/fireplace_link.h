@@ -16,17 +16,20 @@
 // a reboot on either side.
 #pragma once
 #include <cstdint>
+#include <climits>
 #include <cstring>
+#include <cmath>
 #include "mbedtls/md.h"
 #include "esp_random.h"
 #include "fireplace_link_key.h"   // static const uint8_t LINK_KEY[32]
 
 namespace fireplace_link {
 
-static const uint8_t MAGIC0 = 'F', MAGIC1 = 'K', VERSION = 1;
+static const uint8_t MAGIC0 = 'F', MAGIC1 = 'K', VERSION = 2;  // 2: STATE carries the thermostat's temperatures
 static const uint8_t MSG_GET = 1, MSG_STATE = 2, MSG_SET = 3;
 static const size_t MAC_LEN = 16;
 static const uint32_t NONCE_TTL_MS = 60000;
+static const int16_t TEMP_UNKNOWN = INT16_MIN;
 
 // Who made the last change (STATE.last_source).
 enum Source : uint8_t { SRC_UNKNOWN = 0, SRC_HA = 1, SRC_REMOTE = 2, SRC_MAX_RUNTIME = 3, SRC_BOOT = 4, SRC_KNOB = 5, SRC_RESEND = 6 };
@@ -56,6 +59,8 @@ struct State {
   uint8_t max_runtime_hh;  // max runtime in half hours (2..16)
   uint32_t seconds_left;   // until max runtime turns it off; 0 when off
   uint8_t last_source;     // Source
+  int16_t target_c10;      // thermostat set point in 0.1 C; TEMP_UNKNOWN if not known
+  int16_t current_c10;     // thermostat room temperature in 0.1 C; TEMP_UNKNOWN if not known
   uint8_t mac[MAC_LEN];
 };
 
@@ -99,6 +104,11 @@ template<typename T> inline bool open(const uint8_t *data, size_t size, uint8_t 
   for (size_t i = 0; i < MAC_LEN; i++)
     diff |= expect[i] ^ out.mac[i];
   return diff == 0;
+}
+
+// Temperature in C (NaN if unknown) to the STATE encoding.
+inline int16_t temp_c10(float c) {
+  return std::isnan(c) || c < -100 || c > 100 ? TEMP_UNKNOWN : (int16_t) lroundf(c * 10);
 }
 
 inline uint8_t msg_type(const uint8_t *data, size_t size) {

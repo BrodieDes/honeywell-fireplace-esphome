@@ -31,7 +31,7 @@
 
 using namespace fireplace_link;
 
-#define FW_VERSION     0x0110
+#define FW_VERSION     0x0111
 #define PIN_KNOB_CW    8
 #define PIN_KNOB_CCW   7
 #define PIN_TOUCH_INT  9
@@ -254,6 +254,8 @@ static void show_state(void)
   // Turning on from the knob: show a full ring until the hub confirms.
   if (v.on && !s.on) left = (uint32_t) v.max_runtime_hh * 1800;
   v.seconds_left = left;
+  v.target_c10 = s.target_c10;
+  v.current_c10 = s.current_c10;
   if (!have_state) v.status = "Can't reach fireplace";
   else if (send_failed) v.status = "Not sent - turn again";
   else if (batt_now && batt_now <= USB_MV && battery_pct(batt_now) <= LOW_BATT_PCT) v.status = "Battery low - please charge";
@@ -340,8 +342,7 @@ void setup()
   Serial.printf("wake #%lu: radio=%d link=%d ch=%u in %lu ms; on=%u flame=%u fan=%u left=%lus src=%u\n",
                 (unsigned long) wakes, radio, link_ok, hub_channel, (unsigned long) link_ms, state.on,
                 state.flame, state.fan, (unsigned long) state.seconds_left, state.last_source);
-  Serial.printf("knob MAC %s (put this in the hub's espnow peers)
-", WiFi.macAddress().c_str());
+  Serial.printf("knob MAC %s (put this in the hub's espnow peers)\n", WiFi.macAddress().c_str());
   last_input_ms = millis();
   xTaskCreate(knob_task, "knob", 2048, NULL, 3, NULL);
 }

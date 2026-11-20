@@ -26,6 +26,8 @@
 # Knob wall remote (2.3.0): a battery Waveshare knob talks to this board over ESP-NOW
 # (see fireplace_link.h). It asks for the state on every wake and can send changes,
 # which go through update_fire like HA's, so every safety rule above still applies.
+# Since 2.5.0 the knob also shows the thermostat's target and room temperature, which
+# this board reads from HA (the "thermostat" substitution below).
 #
 # Wiring (CC1101 -> ESP32-S3):
 #   VCC  -> 3V3 (never 5V)
@@ -37,12 +39,16 @@
 #   GDO0 -> GPIO14   (TX data in)
 #   GDO2 -> GPIO21   (RX pin, raw demodulated output)
 
+substitutions:
+  # HA climate entity whose target and current temperature the knob shows.
+  thermostat: climate.main_floor_2
+
 esphome:
   name: fireplace-rf
   friendly_name: Fireplace
   project:
     name: brodiedes.fireplace-remote
-    version: "2.4.0"
+    version: "2.5.0"
   includes:
     - fireplace_codes.h
     - wifi_fallback.h
@@ -499,6 +505,8 @@ espnow:
           st.seconds_left = elapsed < total ? (uint32_t) (total - elapsed) : 0;
         }
         st.last_source = id(last_source);
+        st.target_c10 = temp_c10(id(thermostat_target).state);
+        st.current_c10 = temp_c10(id(thermostat_current).state);
         seal(st, MSG_STATE);
         id(espnow_link).send(info.src_addr, (const uint8_t *) &st, sizeof(st));
 
@@ -613,6 +621,17 @@ sensor:
     unit_of_measurement: dBm
     entity_category: diagnostic
     update_interval: never
+  # From HA, for the knob's Target / Current display. Internal: not shown back in HA.
+  - platform: homeassistant
+    id: thermostat_target
+    entity_id: ${thermostat}
+    attribute: temperature
+    internal: true
+  - platform: homeassistant
+    id: thermostat_current
+    entity_id: ${thermostat}
+    attribute: current_temperature
+    internal: true
 
 button:
   # Sends the current state again, for when the fireplace and HA disagree.

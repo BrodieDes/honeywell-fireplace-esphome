@@ -13,6 +13,8 @@ struct FireView {
   uint32_t seconds_left;
   uint8_t max_runtime_hh;  // half hours
   const char *status;   // shown instead of the timer when set (offline, send failed)
+  int16_t target_c10;   // thermostat set point, 0.1 C; INT16_MIN = unknown ("--")
+  int16_t current_c10;  // thermostat room temperature, 0.1 C; INT16_MIN = unknown
 };
 
 void fire_ui_build(void);

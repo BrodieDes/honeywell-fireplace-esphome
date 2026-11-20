@@ -14,6 +14,8 @@
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <limits.h>
 #include "esp_heap_caps.h"
 
 #define FRAME_MS 40
@@ -24,6 +26,7 @@ static Cv fx = {nullptr, nullptr, 122, 124, 116, 74};   // glass opening, y 124.
 static Cv air = {nullptr, nullptr, 116, 46, 128, 78};   // above the crown, y 46..124
 
 static lv_obj_t *arc, *lbl_timer, *lbl_mode, *lbl_value, *lbl_hint, *pips[6], *tabs[3];
+static lv_obj_t *temp_lbls[2][2];  // thermostat [target, current][bold pair], beside the fireplace
 static FireView view = {};
 static float shown_scale = 0, shown_glow = 0, shown_ember = 0.12f, shown_grille = 0;
 static float air_opa[6] = {};
@@ -473,6 +476,21 @@ void fire_ui_build(void)
   lbl_hint = label(&lv_font_montserrat_12, 300, 200, 0xA69A91);
   lv_label_set_text(lbl_hint, "turn left off " LV_SYMBOL_BULLET " right on");
 
+  // Thermostat: target on the left of the fireplace, room temperature on the right,
+  // centred between the pilasters and the screen edge, a little below the middle.
+  // Bold: the built-in fonts have no bold weight, so each number is drawn twice, 1 px apart.
+  for (int side = 0; side < 2; side++) {
+    int dx = side ? 128 : -128;
+    for (int k = 0; k < 2; k++) {
+      lv_obj_t *v = label(&lv_font_montserrat_28, 150, 80, 0xF5EEE8);
+      lv_obj_align(v, LV_ALIGN_TOP_MID, dx + k, 150);
+      temp_lbls[side][k] = v;
+    }
+    lv_obj_t *cap = label(&lv_font_montserrat_12, 184, 80, 0xA69A91);
+    lv_obj_align(cap, LV_ALIGN_TOP_MID, dx, 184);
+    lv_label_set_text(cap, side ? "Current" : "Target");
+  }
+
   // Level pips: 6 bars, 16 x 5, 5 apart.
   for (int i = 0; i < 6; i++) {
     lv_obj_t *p = lv_obj_create(scr);
@@ -547,6 +565,16 @@ void fire_ui_show(const FireView &v)
   else snprintf(buf, sizeof(buf), "Off");
   lv_label_set_text(lbl_value, buf);
   lv_obj_set_style_text_color(lbl_value, C(value_color), 0);
+
+  // Thermostat temperatures: one decimal, "--" when unknown.
+  int16_t temp_val[2] = {v.target_c10, v.current_c10};
+  for (int i = 0; i < 2; i++) {
+    int t = temp_val[i];
+    if (!v.have_state || t == INT16_MIN) snprintf(buf, sizeof(buf), "--");
+    else snprintf(buf, sizeof(buf), "%s%d.%d\xC2\xB0", t < 0 ? "-" : "", abs(t) / 10, abs(t) % 10);
+    lv_label_set_text(temp_lbls[i][0], buf);
+    lv_label_set_text(temp_lbls[i][1], buf);
+  }
 
   bool show_pips = v.have_state && v.mode != 0;
   int level = v.mode == 1 ? v.flame : v.fan;
